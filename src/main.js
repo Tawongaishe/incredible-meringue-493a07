@@ -21,6 +21,8 @@ let finalWavBlob = null;
 let appState = { streak:0, lastListenDate:null, totalListens:0, moodNotes:[] };
 let hasCountedThisPlay = false;
 let lastCurrentTime = 0;
+let currentSavedId = null;     // id of the meditation on the player, if it has been saved
+let currentScriptTitle = "";   // title of the script being recorded, used to suggest a name
 
 // Add local mp3s to public/music/ and list them here — url must start with "/music/".
 // See public/music/README.md for why these need to be local files, not hotlinked URLs.
@@ -73,6 +75,17 @@ app.innerHTML = `
       </div>
       <div class="hero-content">
         <button class="btn btn-primary" id="btn-begin">Begin</button>
+        <button class="btn btn-ghost btn-on-photo" id="btn-saved-intro">My meditations</button>
+      </div>
+    </div>
+
+    <div id="screen-saved" class="screen-hero hidden">
+      <div class="hero-content">
+        <h2>My meditations</h2>
+        <input type="text" id="saved-search" placeholder="Search by name…" />
+        <div class="script-list saved-list" id="saved-list"></div>
+        <div class="status" id="saved-status"></div>
+        <button class="btn btn-primary" id="btn-saved-new">Record a new one</button>
       </div>
     </div>
 
@@ -82,6 +95,7 @@ app.innerHTML = `
         <div class="chips" id="persona-chips"></div>
         <div class="script-list" id="script-list"></div>
         <button class="link-btn" id="btn-write-own">Write my own instead</button>
+        <button class="link-btn" id="btn-saved-library">My saved meditations</button>
       </div>
     </div>
 
@@ -133,7 +147,7 @@ app.innerHTML = `
     </div>
 
     <div id="screen-player" class="card hidden">
-      <h2>Your meditation</h2>
+      <h2 id="player-title">Your meditation</h2>
       <div class="stats">
         <div class="stat"><b id="stat-streak">0</b><span>day streak</span></div>
         <div class="stat"><b id="stat-listens">0</b><span>total listens</span></div>
@@ -147,6 +161,14 @@ app.innerHTML = `
       <div style="text-align:center; margin: 6px 0 16px;">
         <a class="download-link" id="download-link" download="inward-meditation.wav">Download audio file</a>
       </div>
+
+      <div id="save-box" class="save-box">
+        <label for="save-name">Save it with a name so you can come back to it</label>
+        <input type="text" id="save-name" placeholder="Morning calm" maxlength="120" />
+        <button class="btn btn-primary" id="btn-save-med">Save meditation</button>
+        <div class="status" id="save-status"></div>
+      </div>
+      <div id="saved-note" class="muted saved-note hidden">Saved to My meditations.</div>
 
       <div class="section-divider">
         <h2>Studio</h2>
@@ -176,14 +198,15 @@ app.innerHTML = `
 
       <div id="notes-list"></div>
 
-      <button class="btn btn-primary" id="btn-new" style="margin-top:20px;">Start a new one</button>
+      <button class="btn btn-ghost" id="btn-saved-player" style="margin-top:20px;">My meditations</button>
+      <button class="btn btn-primary" id="btn-new">Start a new one</button>
     </div>
   </div>
 `;
 
 const $ = id => document.getElementById(id);
 function show(id){
-  ["screen-intro","screen-library","screen-settings","screen-setup","screen-generating","screen-record","screen-building","screen-player"].forEach(s=>{
+  ["screen-intro","screen-library","screen-saved","screen-settings","screen-setup","screen-generating","screen-record","screen-building","screen-player"].forEach(s=>{
     $(s).classList.toggle("hidden", s !== id);
   });
 }
@@ -243,6 +266,7 @@ $("btn-open-settings").onclick = ()=>{
 };
 
 function useTestScript(){
+  currentScriptTitle = "Test script";
   scriptChunks = TEST_SCRIPT_CHUNKS.slice();
   recordedBlobs = new Array(scriptChunks.length).fill(null);
   currentChunkIndex = 0;
@@ -275,6 +299,7 @@ function renderLibrary(){
     b.querySelector("b").textContent = s.title;
     b.querySelector("span").textContent = s.chunks[0];
     b.onclick = ()=>{
+      currentScriptTitle = s.title;
       scriptChunks = s.chunks.slice();
       recordedBlobs = new Array(scriptChunks.length).fill(null);
       currentChunkIndex = 0;
@@ -312,6 +337,7 @@ $("btn-generate").onclick = async ()=>{
   show("screen-generating");
   try{
     const chunks = await generateScript(feeling, selectedTheme);
+    currentScriptTitle = selectedTheme || "My own script";
     scriptChunks = chunks;
     recordedBlobs = new Array(chunks.length).fill(null);
     currentChunkIndex = 0;
@@ -405,7 +431,7 @@ function renderRecordControls(){
     const isLast = currentChunkIndex === scriptChunks.length - 1;
     nextBtn.textContent = isLast ? "Finish & build my meditation" : "Next piece →";
     nextBtn.onclick = ()=>{
-      if(isLast){ buildFinalAudio(); }
+      if(isLast){ currentSavedId = null; buildFinalAudio(); }
       else { currentChunkIndex += 1; renderRecordScreen(); }
     };
     wrap.appendChild(nextBtn);
@@ -453,7 +479,7 @@ async function startRecording(){
 }
 
 // ---------- build final audio ----------
-async function buildFinalAudio(isRebuild=false){
+async function buildFinalAudio(isRebuild=false, onError=null){
   stopPreview();
   show("screen-building");
   try{
@@ -554,10 +580,13 @@ async function buildFinalAudio(isRebuild=false){
     $("download-link").href = url;
     if(oldUrl && oldUrl.startsWith("blob:")) URL.revokeObjectURL(oldUrl);
     setupPlayer();
+    renderSaveBox();
     show("screen-player");
   }catch(e){
     console.error(e);
-    if(isRebuild){
+    if(onError){
+      onError(e);
+    } else if(isRebuild){
       show("screen-player");
       $("studio-status").textContent = "Rebuild failed: " + e.message;
       $("studio-status").className = "status error";
@@ -675,6 +704,20 @@ function initStudioPanel(){
     studioSettings.effectEnabled = $("studio-effect-toggle").checked;
     $("studio-status").textContent = "";
     await buildFinalAudio(true);
+    if(currentSavedId){
+      try{
+        await apiJson(`${API}/${currentSavedId}`, {
+          method:"PATCH",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({ studio: studioSettings })
+        });
+        $("studio-status").textContent = "Saved these settings to this meditation.";
+        $("studio-status").className = "status";
+      }catch(e){
+        $("studio-status").textContent = "Rebuilt, but couldn't save these settings: " + e.message;
+        $("studio-status").className = "status error";
+      }
+    }
   };
 }
 function renderStudioLabels(){
@@ -784,8 +827,199 @@ $("btn-new").onclick = ()=>{
   [...$("theme-chips").children].forEach(c=>c.classList.remove("active"));
   scriptChunks = []; recordedBlobs = []; currentChunkIndex = 0; finalWavBlob = null;
   cachedVoiceBuffers = null;
+  currentSavedId = null; currentScriptTitle = "";
+  $("save-name").value = "";
+  pausePlayer();
+  renderLibrary();
   show("screen-library");
 };
+
+// ---------- saved meditations (Netlify Function + Blobs, no login) ----------
+const API = "/api/meditations";
+let savedItems = [];
+
+async function apiJson(url, options){
+  const resp = await fetch(url, options);
+  let data = null;
+  try{ data = await resp.json(); }catch(e){ /* not JSON */ }
+  if(!resp.ok) throw new Error((data && data.error) || `Request failed (${resp.status})`);
+  return data;
+}
+
+function pausePlayer(){
+  const audio = $("audio-el");
+  if(audio && !audio.paused) audio.pause();
+  $("play-btn").textContent = "▶";
+}
+
+function syncStudioControls(){
+  $("studio-music-select").value = studioSettings.musicTrackId;
+  $("studio-music-volume").value = Math.round(studioSettings.musicVolume*100);
+  $("studio-voice-volume").value = Math.round(studioSettings.voiceVolume*100);
+  $("studio-effect-toggle").checked = studioSettings.effectEnabled;
+  renderStudioLabels();
+}
+
+function renderSaveBox(nameOverride){
+  $("save-status").textContent = "";
+  $("save-status").className = "status";
+  if(currentSavedId){
+    if(nameOverride) $("player-title").textContent = nameOverride;
+    $("save-box").classList.add("hidden");
+    $("saved-note").classList.remove("hidden");
+  } else {
+    $("player-title").textContent = "Your meditation";
+    if(!$("save-name").value.trim()) $("save-name").value = currentScriptTitle || "";
+    $("btn-save-med").disabled = false;
+    $("save-box").classList.remove("hidden");
+    $("saved-note").classList.add("hidden");
+  }
+}
+
+$("btn-save-med").onclick = async ()=>{
+  const name = $("save-name").value.trim();
+  const status = $("save-status");
+  status.className = "status";
+  if(!name){ status.textContent = "Give it a name first."; status.className = "status error"; return; }
+  if(!recordedBlobs.length || recordedBlobs.some(b=>!b)){ status.textContent = "There's nothing recorded to save yet."; status.className = "status error"; return; }
+  const btn = $("btn-save-med");
+  btn.disabled = true;
+  const id = (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2,10));
+  try{
+    for(let i=0;i<recordedBlobs.length;i++){
+      status.textContent = `Saving your voice… (${i+1} of ${recordedBlobs.length})`;
+      const blob = recordedBlobs[i];
+      await apiJson(`${API}/${id}/pieces/${i}`, {
+        method:"PUT",
+        headers:{ "Content-Type": blob.type || "application/octet-stream" },
+        body: blob
+      });
+    }
+    status.textContent = "Almost done…";
+    await apiJson(API, {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ id, name, scriptTitle: currentScriptTitle || null, chunks: scriptChunks, studio: studioSettings })
+    });
+    currentSavedId = id;
+    renderSaveBox(name);
+  }catch(e){
+    console.error(e);
+    status.textContent = "Couldn't save: " + e.message;
+    status.className = "status error";
+    btn.disabled = false;
+  }
+};
+
+async function openSavedList(){
+  stopPreview();
+  pausePlayer();
+  show("screen-saved");
+  $("saved-search").value = "";
+  $("saved-list").innerHTML = "";
+  $("saved-status").textContent = "Loading…";
+  $("saved-status").className = "status";
+  try{
+    savedItems = await apiJson(API);
+    $("saved-status").textContent = "";
+    renderSavedList();
+  }catch(e){
+    $("saved-status").textContent = "Couldn't load your meditations: " + e.message;
+    $("saved-status").className = "status error";
+  }
+}
+
+function renderSavedList(){
+  const q = $("saved-search").value.trim().toLowerCase();
+  const list = $("saved-list");
+  list.innerHTML = "";
+  if(!savedItems.length){
+    list.innerHTML = `<p class="muted">Nothing saved yet. After you record a meditation, give it a name and tap "Save meditation".</p>`;
+    return;
+  }
+  const items = savedItems.filter(m=>!q || m.name.toLowerCase().includes(q));
+  if(!items.length){
+    list.innerHTML = `<p class="muted">No meditation with that name.</p>`;
+    return;
+  }
+  items.forEach(m=>{
+    const row = document.createElement("div");
+    row.className = "saved-item";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "script-item";
+    open.innerHTML = `<b></b><span></span>`;
+    open.querySelector("b").textContent = m.name;
+    const date = m.createdAt ? new Date(m.createdAt).toLocaleDateString(undefined,{day:"numeric",month:"short",year:"numeric"}) : "";
+    open.querySelector("span").textContent = [m.scriptTitle && m.scriptTitle !== m.name ? m.scriptTitle : "", date].filter(Boolean).join(" · ");
+    open.onclick = ()=> openSaved(m.id);
+
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "saved-del";
+    del.setAttribute("aria-label", `Delete ${m.name}`);
+    del.textContent = "Delete";
+    del.onclick = async ()=>{
+      if(del.dataset.confirm !== "1"){
+        del.dataset.confirm = "1"; del.textContent = "Sure?"; del.classList.add("confirm");
+        setTimeout(()=>{ if(del.isConnected){ del.dataset.confirm = ""; del.textContent = "Delete"; del.classList.remove("confirm"); } }, 3000);
+        return;
+      }
+      del.disabled = true;
+      try{
+        await apiJson(`${API}/${m.id}`, { method:"DELETE" });
+        savedItems = savedItems.filter(x=>x.id !== m.id);
+        renderSavedList();
+      }catch(e){
+        $("saved-status").textContent = "Couldn't delete: " + e.message;
+        $("saved-status").className = "status error";
+        del.disabled = false;
+      }
+    };
+    row.appendChild(open);
+    row.appendChild(del);
+    list.appendChild(row);
+  });
+}
+
+async function openSaved(id){
+  const fail = (e)=>{
+    console.error(e);
+    currentSavedId = null;
+    show("screen-saved");
+    $("saved-status").textContent = "Couldn't open it: " + e.message;
+    $("saved-status").className = "status error";
+  };
+  show("screen-building");
+  try{
+    const meta = await apiJson(`${API}/${id}`);
+    const blobs = await Promise.all(Array.from({length: meta.pieceCount}, async (_,i)=>{
+      const resp = await fetch(`${API}/${meta.id}/pieces/${i}`);
+      if(!resp.ok) throw new Error(`Part ${i+1} of the recording is missing`);
+      return await resp.blob();
+    }));
+    scriptChunks = meta.chunks;
+    recordedBlobs = blobs;
+    cachedVoiceBuffers = null;
+    currentScriptTitle = meta.scriptTitle || "";
+    if(meta.studio){
+      studioSettings = { ...studioSettings, ...meta.studio };
+      if(!BACKGROUND_TRACKS.some(t=>t.id===studioSettings.musicTrackId)) studioSettings.musicTrackId = "pad";
+    }
+    syncStudioControls();
+    currentSavedId = meta.id;
+    await buildFinalAudio(false, fail);
+    if(currentSavedId === meta.id) renderSaveBox(meta.name);
+  }catch(e){
+    fail(e);
+  }
+}
+
+$("saved-search").oninput = renderSavedList;
+$("btn-saved-intro").onclick = openSavedList;
+$("btn-saved-library").onclick = openSavedList;
+$("btn-saved-player").onclick = openSavedList;
+$("btn-saved-new").onclick = ()=>{ renderLibrary(); show("screen-library"); };
 
 // API key screen is skipped for now — reachable via "Write my own instead"
 $("btn-begin").onclick = ()=>{
